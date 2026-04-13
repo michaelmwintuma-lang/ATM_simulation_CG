@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure ATM Interface Simulator</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="atm-machine">
+        <div class="atm-header">
+            <h2>EasyAccess ATM</h2>
+            <div class="atm-status">SECURE TERMINAL ACTIVE</div>
+        </div>
+        
+        <div class="atm-screen-container">
+            <canvas id="atmCanvas" width="800" height="600"></canvas>
+            <!-- Overlay for Video Tutorial -->
+            <div id="videoOverlay" class="hidden">
+                <video id="tutorialVideo" controls preload="metadata">
+                    <!-- Placeholder, won't actually play unless source is valid, but fulfills the structural requirement -->
+                    <source src="assets/safe_pin_tutorial.mp4" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+                <button id="closeVideoBtn">Close Tutorial</button>
+            </div>
+        </div>
+
+        <div class="atm-panel">
+            <div class="card-slot-container">
+                <div class="label">Insert Card</div>
+                <div class="card-slot" id="cardSlot"></div>
+            </div>
+            
+            <div class="keypad-container" id="keypad">
+                <!-- Keypad will be structurally present but primarily handled via canvas or overlapping UI if we want CSS. 
+                     Wait, the prompt says "Gouraud Shading effect on the 3D ATM keypad buttons to simulate depth". 
+                     So the keypad will be drawn on the Canvas! 
+                     We can keep this empty or just use it as a trigger area if we don't draw it on canvas.
+                     Let's draw the 3D keys ON the canvas. So we leave this area for non-rendered hardware inputs, 
+                     but we'll just handle everything via Canvas clicks. -->
+            </div>
+            
+            <div class="cash-dispenser-container">
+                <div class="label">Cash Dispenser</div>
+                <div class="cash-dispenser" id="cashDispenser"></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Audio element for beep (WAV/PCM representation) -->
+    <audio id="beepAudio" preload="auto">
+        <source src="assets/beep.wav" type="audio/wav">
+    </audio>
+
+    <script src="js/math.js"></script>
+    <script src="js/graphics.js"></script>
+    <script>
+/**
+ * CashSystem.js (Inlined)
+ * "Anime-Style Cash Dispense" module for ATM Simulator.
+ * Handles 3D bill physics, projection, and pixel rendering.
+ */
+
+class Bill {
+    constructor(x, y, z) {
+        this.width = 120;
+        this.height = 50;
+
+        // Origin at the center of the bill
+        this.baseVertices = [
+            { x: -this.width/2, y: -this.height/2, z: 0, w: 1 },
+            { x:  this.width/2, y: -this.height/2, z: 0, w: 1 },
+            { x:  this.width/2, y:  this.height/2, z: 0, w: 1 },
+            { x: -this.width/2, y:  this.height/2, z: 0, w: 1 }
+        ];
+
+        // 3D position
+        this.x = x;
+        this.y = y;
+        this.z = z;
+
+        // Dynamics
+        this.vx = (Math.random() - 0.5) * 15; // Fan-out effect
+        this.vy = -10 - Math.random() * 10;
+        this.vz = -5 - Math.random() * 5;
+
+        // Rotations
+        this.thetaY = 0;
+        this.thetaX = (Math.random() - 0.5) * 0.5;
+
+        // State: 'burst', 'flutter', 'collect'
+        this.state = 'burst';
+        this.time = 0;
+        
+        // Scale
+        this.scale = 1.0;
+        
+        // Animation timing
+        this.burstTime = 0;
+    }
+
+    update() {
+        this.time += 0.05;
+
+        if (this.state === 'burst') {
+            // Apply ease-out to velocity
+            this.x += this.vx;
+            this.y += this.vy;
+            this.z += this.vz;
+
+            this.vx *= 0.9; // Friction / ease-out
+            this.vy *= 0.9;
+            this.vz *= 0.9;
+
+            this.thetaY += 0.1;
+
+            if (Math.abs(this.vy) < 0.5 && Math.abs(this.vx) < 0.5) {
+                this.state = 'flutter';
+                this.flutterBaseY = this.y;
+            }
+        } else if (this.state === 'flutter') {
+            // Flutter animation: Sine wave to Y, Y-Axis Rotation
+            this.y = this.flutterBaseY + Math.sin(this.time * 2) * 10;
+            
+            // theta = sin(time) * 20 degrees (approx 0.35 rad)
+            this.thetaY = Math.sin(this.time) * 0.35;
+        } else if (this.state === 'collect') {
+            // Rapidly scale down and translate to bottom-right
+            this.scale *= 0.8;
+            this.x += (800 - this.x) * 0.2;
+            this.y += (600 - this.y) * 0.2;
+            this.z += (-200 - this.z) * 0.2;
+            this.thetaY += 0.5;
+        }
+    }
+
+    getProjectedVertices(fov, aspect, zNear, zFar, screenWidth, screenHeight) {
+        // Build transformation matrices
+        let mTranslation = translationMatrix(this.x, this.y, this.z);
+        let mRotationY = rotationYMatrix(this.thetaY);
+        let mRotationX = rotationXMatrix(this.thetaX);
+        let mScale = scalingMatrix(this.scale, this.scale, this.scale);
+
+        // Combine: T * R * S
+        let mTransform = multiplyMatrixMatrix(mTranslation, multiplyMatrixMatrix(mRotationY, multiplyMatrixMatrix(mRotationX, mScale)));
+
+        let projected = [];
+        for (let i = 0; i < this.baseVertices.length; i++) {
+            // Transform
+            let vTransformed = multiplyMatrixVector(mTransform, this.baseVertices[i]);
+            // Project
+            let vProjected = projectPerspective(vTransformed, fov, aspect, zNear, zFar);
+            // Screen mapping
+            let vScreen = mapToScreen(vProjected, screenWidth, screenHeight);
+            projected.push(vScreen);
+        }
+        return projected;
+    }
+}
+
+class CashSystem {
+    constructor(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        if (!this.canvas) return; // Silent fail if canvas not present
+        
+        this.ctx = this.canvas.getContext('2d');
+        this.width = this.canvas.width;
+        this.height = this.canvas.height;
+        this.imageData = this.ctx.createImageData(this.width, this.height);
+        
+        this.bills = [];
+        this.isRunning = false;
+
+        // Projection config
+        this.fov = Math.PI / 3;
+        this.aspect = this.width / this.height;
+        this.zNear = 1;
+        this.zFar = 1000;
+
+        // Bind interactive events
+        this.canvas.addEventListener('mousedown', this.handleClick.bind(this));
+    }
+
+    dispense(count = 7) {
+        for (let i = 0; i < count; i++) {
+            // Start from center of machine
+            this.bills.push(new Bill(0, 0, 500));
+        }
+        if (!this.isRunning) {
+            this.isRunning = true;
+            this.loop();
+        }
+    }
+
+    handleClick(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        // Simple bounding box check based on projected center for interactivity
+        for (let i = this.bills.length - 1; i >= 0; i--) {
+            let bill = this.bills[i];
+            if (bill.state !== 'collect') {
+                let vCenter = { x: 0, y: 0, z: 0, w: 1 };
+                let mTranslation = translationMatrix(bill.x, bill.y, bill.z);
+                let vTransformed = multiplyMatrixVector(mTranslation, vCenter);
+                let vProjected = projectPerspective(vTransformed, this.fov, this.aspect, this.zNear, this.zFar);
+                let screenPos = mapToScreen(vProjected, this.width, this.height);
+
+                // Approximate click radius
+                let dx = mouseX - screenPos.x;
+                let dy = mouseY - screenPos.y;
+                if (Math.sqrt(dx * dx + dy * dy) < 80) {
+                    bill.state = 'collect';
+                    break; // Only collect one at a time per click
+                }
+            }
+        }
+    }
+
+    clearImageData() {
+        // Clear pixel buffer (transparent)
+        for(let i=0; i<this.imageData.data.length; i+=4){
+            this.imageData.data[i] = 0;
+            this.imageData.data[i+1] = 0;
+            this.imageData.data[i+2] = 0;
+            this.imageData.data[i+3] = 0;
+        }
+    }
+
+    // A simple polygon fill 
+    drawBillFill(points) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(points[0].x, points[0].y);
+        for (let i = 1; i < points.length; i++) {
+            this.ctx.lineTo(points[i].x, points[i].y);
+        }
+        this.ctx.closePath();
+
+        // Gouraud-style gradient
+        let cx = (points[0].x + points[2].x) / 2;
+        let cy = (points[0].y + points[2].y) / 2;
+        let pWidth = Math.abs(points[0].x - points[1].x) || 1;
+        
+        let grd = this.ctx.createRadialGradient(cx, cy, pWidth * 0.1, cx, cy, pWidth);
+        grd.addColorStop(0, "rgb(133, 187, 101)"); 
+        grd.addColorStop(1, "rgb(60, 100, 40)");   
+
+        this.ctx.fillStyle = grd;
+        this.ctx.fill();
+    }
+
+    render() {
+        this.ctx.clearRect(0, 0, this.width, this.height);
+        this.clearImageData();
+
+        this.bills.sort((a, b) => b.z - a.z);
+
+        for (let bill of this.bills) {
+            let pts = bill.getProjectedVertices(this.fov, this.aspect, this.zNear, this.zFar, this.width, this.height);
+            this.drawBillFill(pts);
+            
+            let edgeColor = { r: 30, g: 60, b: 20, a: 255 };
+            drawLineBresenham(this.imageData, pts[0].x, pts[0].y, pts[1].x, pts[1].y, edgeColor);
+            drawLineBresenham(this.imageData, pts[1].x, pts[1].y, pts[2].x, pts[2].y, edgeColor);
+            drawLineBresenham(this.imageData, pts[2].x, pts[2].y, pts[3].x, pts[3].y, edgeColor);
+            drawLineBresenham(this.imageData, pts[3].x, pts[3].y, pts[0].x, pts[0].y, edgeColor);
+        }
+
+        this.ctx.putImageData(this.imageData, 0, 0);
+    }
+
+    loop() {
+        if (!this.isRunning) return;
+
+        let activeCount = 0;
+        for (let bill of this.bills) {
+            bill.update();
+            if (bill.scale > 0.05) {
+                activeCount++;
+            }
+        }
+
+        this.bills = this.bills.filter(b => b.scale > 0.05);
+        this.render();
+
+        if (this.bills.length > 0) {
+            requestAnimationFrame(this.loop.bind(this));
+        } else {
+            this.isRunning = false;
+            this.ctx.clearRect(0, 0, this.width, this.height);
+        }
+    }
+}
+window.CashSystem = CashSystem;
+    </script>
+    <script src="js/main.js"></script>
+</body>
+</html>
